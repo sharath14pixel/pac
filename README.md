@@ -8,9 +8,9 @@
 > This repo is a study artifact from the [BitGN PAC 2026](https://bitgn.com/challenge/PAC) hackathon.
 > Issues and PRs will not be reviewed — **forks are welcome**. If you extend or reuse it, [drop me a line](https://github.com/Kanevry).
 
-An autonomous AI agent built for the [**BitGN Personal Agent Challenge (PAC)**](https://bitgn.com/challenge/PAC) — a deterministic, side-effect-scored benchmark for trustworthy personal agents, hosted at the [AI Factory Vienna](https://ai-mission.eu/hackathon.html) hackathon on April 11, 2026.
+An autonomous AI agent built for the [**BitGN Personal Agent Challenge (PAC)**](https://bitgn.com/challenge/PAC) — a deterministic, side-effect-scored benchmark for trustworthy personal agents, hosted on-site in Vienna on April 11, 2026 by [AI Factory Austria](https://ai-at.eu/en/) in collaboration with [AI Impact Mission](https://ai-mission.eu/).
 
-> This repository is the 1st-place entry for the on-site PAC 2026 run in Vienna, by [Bernhard Götzendorfer](https://github.com/Kanevry). The code is published so the approach — soft SGR + layered hardening + native tool calling — can be studied and reproduced.
+> This repository is the 1st-place entry for the on-site PAC 2026 run in Vienna, by [Bernhard Götzendorfer](https://www.gotzendorfer.at/) ([@Kanevry](https://github.com/Kanevry)). The code is published so the approach — soft SGR + layered hardening + native tool calling — can be studied and reproduced.
 
 <p align="center">
   <img src="assets/certificate.jpg" alt="1st place certificate — BitGN PAC 2026, AI Factory Vienna, April 11, 2026" width="55%" />
@@ -100,6 +100,18 @@ on top.
 
 ## High-Level Flow
 
+Every task walks through the same six beats. Each iteration feeds a pruned message window into `generateText()` and lets the LLM emit either a tool call or the terminal `report_completion`.
+
+1. **Bootstrap** — list the workspace tree, read `AGENTS.md`, fetch current time. Fresh context, every task.
+2. **LLM picks a move** — either a tool call, or `report_completion`.
+3. **Pre-dispatch gates** — path guard (B1), PII refusal (B2), destructive brake (B4). Rejected calls come back as recoverable tool errors so the agent can rethink, not crash.
+4. **Dispatch over ConnectRPC** — the tool actually runs against the BitGN `PcmRuntime`.
+5. **Post-read gates** — the result is formatted as shell-like output, then swept for prompt injection (`security.ts`) and vendor secrets (B5 redaction) before it re-enters the LLM context.
+6. **Termination** — when the LLM calls `report_completion`, the refs-validation gate (B3) cross-checks every `grounding_ref` against paths the agent actually touched, and only then does the outcome get submitted.
+
+<details>
+<summary>Diagram (mermaid)</summary>
+
 ```mermaid
 flowchart LR
     T[Task Instruction] --> B[Bootstrap<br/>tree · AGENTS.md · context]
@@ -116,13 +128,22 @@ flowchart LR
     R -->|fail| L
 ```
 
-Each loop iteration feeds a pruned message window into `generateText()` and lets the LLM emit either a tool call or the terminal `report_completion`. Every tool call passes through a stack of hardening gates **before** it leaves the agent, and every tool result passes through a scanning pipeline **before** it re-enters the LLM context.
+</details>
 
 ---
 
 ## Architecture
 
-The code is organised in three concentric rings: a thin **transport** layer that speaks ConnectRPC to the BitGN platform, a **core** layer that holds the LLM loop and everything the prompt needs, and a **hardening** ring of small, dependency-free modules that plug in as pre- and post-dispatch gates.
+The code is organised as **three concentric rings**:
+
+1. **Transport ring** (`harness.ts`, `runtime.ts`) — thin ConnectRPC clients for BitGN's `HarnessService` (runs, trials, benchmarks) and `PcmRuntime` (per-task file operations).
+2. **Core ring** (`agent.ts`, `prompts.ts`, `schema.ts`, `formatters.ts`, `messages.ts`, `retry.ts`) — the LLM loop, the soft-SGR prompt, tool schemas, shell-style result rendering, context pruning, and transient-error retry.
+3. **Hardening ring** (`paths.ts`, `pii.ts`, `refs.ts`, `security.ts`, `redaction.ts`, re-exported through `hardening.ts`) — pure, dependency-free modules implementing the individually toggleable defense layers.
+
+`main.ts` is the runner at the top that starts a session or playground; everything below it is reusable. The hardening ring is deliberately independent of the core ring — any layer can be deleted, unit-tested, or disabled without touching the agent loop.
+
+<details>
+<summary>Diagram (mermaid)</summary>
 
 ```mermaid
 graph TB
@@ -146,11 +167,7 @@ graph TB
     Trans --> BitGN
 ```
 
-The system is organised as **three concentric rings**:
-
-1. **Transport ring** (`harness.ts`, `runtime.ts`) — thin ConnectRPC clients for BitGN's `HarnessService` (runs, trials, benchmarks) and `PcmRuntime` (per-task file operations).
-2. **Core ring** (`agent.ts`, `prompts.ts`, `schema.ts`, `formatters.ts`, `messages.ts`, `retry.ts`) — the LLM loop, the soft-SGR prompt, tool schemas, shell-style result rendering, context pruning, and transient-error retry.
-3. **Hardening ring** (`paths.ts`, `pii.ts`, `refs.ts`, `security.ts`, `redaction.ts`, re-exported through `hardening.ts`) — a facade of pure, dependency-free modules implementing individually toggleable defense layers.
+</details>
 
 ---
 
@@ -319,7 +336,7 @@ Metric writes are fire-and-forget and never throw into the agent path. Disable w
 ## Credits & Built With
 
 - **Challenge**: [BitGN PAC](https://bitgn.com/challenge/PAC), designed by [Rinat Abdullin](https://abdullin.com/).
-- **Venue & hosts**: [AI Factory Austria / AI Impact Mission](https://ai-mission.eu/) — on-site hackathon, Vienna, April 11, 2026. Signed by Felix Krause (Head of AI Factory Austria), Rinat Abdullin (Challenge Design & Founder BitGN), and Markus Keiblinger (President of AIM International).
+- **Venue & hosts**: [AI Factory Austria](https://ai-at.eu/en/) hosted the on-site hackathon in Vienna on April 11, 2026, in collaboration with [AI Impact Mission](https://ai-mission.eu/). The 1st-place certificate is signed by **Felix Krause** (Head of AI Factory Austria), **Rinat Abdullin** (Challenge Design & Founder, BitGN), and **Markus Keiblinger** (President, AIM International).
 - **Scaffolding**: Built on top of [**session-orchestrator**](https://github.com/Kanevry/session-orchestrator) — my Claude Code harness for wave-based AI development. Planning, parallel implementation, inter-wave quality gates, discovery probes, session retros. Three-hour build windows are only survivable when the workflow is already routine.
 - **Inspiration**: [Schema-Guided Reasoning](https://abdullin.com/schema-guided-reasoning/), also by Rinat.
 - **Models**: Claude Opus 4.6 and GPT-4.1, driven via [Vercel AI SDK v6](https://ai-sdk.dev/).
