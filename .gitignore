@@ -6,6 +6,12 @@ dist/
 !.env.local.example
 *.tsbuildinfo
 
+# macOS metadata
+.DS_Store
+
+# Claude Code orchestrator state (private, never committed)
+.orchestrator/
+
 # Reference repos mounted for local research only
 bitgn-challenges/
 bitgn-sample-agents/
