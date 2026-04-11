@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+!.env.local.example
+*.tsbuildinfo
+
+# Reference repos mounted for local research only
+bitgn-challenges/
+bitgn-sample-agents/
+
+# BitGN runtime state (benchmark runs, trial logs)
+.bitgn/
+
+# Local benchmark run logs (one log per execution; not source-of-truth)
+.runs/
+
+# BitGN harness workspace sync (per-task sandbox mirrors)
+Vault-BitGN/
