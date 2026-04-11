@@ -2,16 +2,35 @@
   "name": "bitgn-pac-agent",
   "version": "0.1.0",
   "type": "module",
-  "private": true,
-  "description": "BitGN PAC Hackathon Agent — Trustworthy Personal Knowledge Management",
+  "private": false,
+  "description": "1st-place entry for the BitGN Personal Agent Challenge (PAC) 2026 — a defense-in-depth personal agent with soft SGR, layered prompt-injection hardening, and native tool calling on the Vercel AI SDK.",
   "scripts": {
     "start": "tsx src/main.ts",
     "task": "tsx src/main.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": [],
-  "author": "Bernhard Götzendorfer",
+  "keywords": [
+    "ai-agent",
+    "claude",
+    "connectrpc",
+    "defense-in-depth",
+    "hackathon-winner",
+    "prompt-injection",
+    "schema-guided-reasoning",
+    "tool-calling",
+    "typescript",
+    "vercel-ai-sdk"
+  ],
+  "author": {
+    "name": "Bernhard Götzendorfer",
+    "url": "https://github.com/Kanevry"
+  },
   "license": "MIT",
+  "homepage": "https://github.com/Kanevry/bitgn-pac-agent-public#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kanevry/bitgn-pac-agent-public.git"
+  },
   "packageManager": "pnpm@10.31.0",
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.64",
