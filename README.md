@@ -4,9 +4,17 @@
 
 # BitGN PAC Agent
 
+> **Status: reference implementation, not maintained.**
+> This repo is a study artifact from the [BitGN PAC 2026](https://bitgn.com/challenge/PAC) hackathon.
+> Issues and PRs will not be reviewed — **forks are welcome**. If you extend or reuse it, [drop me a line](https://github.com/Kanevry).
+
 An autonomous AI agent built for the [**BitGN Personal Agent Challenge (PAC)**](https://bitgn.com/challenge/PAC) — a deterministic, side-effect-scored benchmark for trustworthy personal agents, hosted at the [AI Factory Vienna](https://ai-mission.eu/hackathon.html) hackathon on April 11, 2026.
 
 > This repository is the 1st-place entry for the on-site PAC 2026 run in Vienna, by [Bernhard Götzendorfer](https://github.com/Kanevry). The code is published so the approach — soft SGR + layered hardening + native tool calling — can be studied and reproduced.
+
+<p align="center">
+  <img src="assets/certificate.jpg" alt="1st place certificate — BitGN PAC 2026, AI Factory Vienna, April 11, 2026" width="55%" />
+</p>
 
 The agent operates inside a sandboxed virtual machine (a file-based personal-knowledge workspace resembling an Obsidian vault) and solves natural-language tasks by reading, writing, and organising files through a small, well-defined ConnectRPC tool API — while defending itself against prompt injection, phishing, PII-exfiltration, and path-traversal attacks embedded in the very files it reads.
 
@@ -17,6 +25,7 @@ The agent operates inside a sandboxed virtual machine (a file-based personal-kno
 ## Table of Contents
 
 - [What the Agent Does](#what-the-agent-does)
+- [The Story](#the-story)
 - [High-Level Flow](#high-level-flow)
 - [Architecture](#architecture)
 - [Defense Layers (Track B Hardening)](#defense-layers-track-b-hardening)
@@ -26,6 +35,7 @@ The agent operates inside a sandboxed virtual machine (a file-based personal-kno
 - [Configuration](#configuration)
 - [Observability](#observability)
 - [Design Decisions](#design-decisions)
+- [Credits & Built With](#credits--built-with)
 - [References](#references)
 - [License](#license)
 
@@ -41,6 +51,50 @@ The BitGN PAC platform hands the agent a `PcmRuntime` gRPC connection and a sing
 4. **Report the outcome** — call `report_completion` with the correct `Outcome` enum and a list of `grounding_refs` (file paths that contributed to the answer).
 
 A task is scored **1.0** if the observable side effects match the reference trace, less for partial matches, **0.0** on protocol violation, disallowed destructive action, or wrong outcome enum.
+
+---
+
+## The Story
+
+The PAC 2026 on-site format is a three-hour build window followed by a two-hour
+evaluation window against **104 tasks** on `bitgn/pac1-prod`, with a fresh
+per-task workspace, BLIND scoring, and no code changes allowed once the eval
+begins. The workspace is a file-based personal-knowledge vault — calendars,
+notes, contacts, emails — and every file can contain hostile content designed to
+get the agent to misbehave. Scoring is deterministic: the grader checks which
+tool calls happened, which files moved, and which outcome enum came back. Prose
+quality counts for nothing.
+
+I showed up with [**session-orchestrator**](https://github.com/Kanevry/session-orchestrator) — my Claude Code harness
+for wave-based AI development — already wired into my workflow. Without it,
+shipping a layered hardening stack, metrics writer, and a second SDK spike in a
+single day would not have been possible. The muscle memory was the part I did
+not have to learn on the day.
+
+**The moment it got real.** During the final regression run on the morning of
+gameday, one of the calendar tasks quietly did not write into the sandboxed
+workspace — it created a real event in my actual Google Calendar. I was
+prototyping a second agent loop on top of `@anthropic-ai/claude-agent-sdk` in
+parallel, and `bypassPermissions` had been auto-approving tools rather than
+*scoping* them. Because the SDK runs inside a Claude Code session, it had quietly
+inherited the OAuth scopes of every remote connector on my account (Gmail,
+Google Calendar, Notion, the works). The fix was a `canUseTool` runtime gate
+plus an explicit `disallowedTools` block list for everything that was not
+`mcp__bitgn__*`. The real calendar event got deleted by hand, the regression
+came back clean, and the hardened path stayed in the private repo. **The
+published code in this repo uses the Vercel AI SDK path**, where tool selection
+is statically pinned by the Zod schema and the problem cannot occur. But the
+lesson travels: *never trust `bypassPermissions` without an explicit allow-list
+gate on top of it.*
+
+**The afternoon everyone stopped typing.** Around 14:47 CEST, mid-evaluation,
+the BitGN platform tipped into a disk-full state. `StartRun` and
+`StartPlayground` started returning 502 across every model; the read side stayed
+up, so in-flight runs finished, but nobody could kick off anything new for a
+while. It was the moment the room went quiet and everyone looked up from their
+laptops at the same time. A good reminder that live benchmarks against real
+infrastructure are their own sport, separate from building the agent that runs
+on top.
 
 ---
 
@@ -67,6 +121,8 @@ Each loop iteration feeds a pruned message window into `generateText()` and lets
 ---
 
 ## Architecture
+
+The code is organised in three concentric rings: a thin **transport** layer that speaks ConnectRPC to the BitGN platform, a **core** layer that holds the LLM loop and everything the prompt needs, and a **hardening** ring of small, dependency-free modules that plug in as pre- and post-dispatch gates.
 
 ```mermaid
 graph TB
@@ -260,6 +316,17 @@ Metric writes are fire-and-forget and never throw into the agent path. Disable w
 
 ---
 
+## Credits & Built With
+
+- **Challenge**: [BitGN PAC](https://bitgn.com/challenge/PAC), designed by [Rinat Abdullin](https://abdullin.com/).
+- **Venue & hosts**: [AI Factory Austria / AI Impact Mission](https://ai-mission.eu/) — on-site hackathon, Vienna, April 11, 2026. Signed by Felix Krause (Head of AI Factory Austria), Rinat Abdullin (Challenge Design & Founder BitGN), and Markus Keiblinger (President of AIM International).
+- **Scaffolding**: Built on top of [**session-orchestrator**](https://github.com/Kanevry/session-orchestrator) — my Claude Code harness for wave-based AI development. Planning, parallel implementation, inter-wave quality gates, discovery probes, session retros. Three-hour build windows are only survivable when the workflow is already routine.
+- **Inspiration**: [Schema-Guided Reasoning](https://abdullin.com/schema-guided-reasoning/), also by Rinat.
+- **Models**: Claude Opus 4.6 and GPT-4.1, driven via [Vercel AI SDK v6](https://ai-sdk.dev/).
+- **Transport**: [ConnectRPC](https://connectrpc.com/) over HTTP/2, using the official `@buf/bitgn_api.*` generated clients.
+
+---
+
 ## References
 
 - [BitGN PAC Challenge](https://bitgn.com/challenge/PAC) — rules, scoring rubric, leaderboard
@@ -267,6 +334,7 @@ Metric writes are fire-and-forget and never throw into the agent path. Disable w
 - [Schema-Guided Reasoning](https://abdullin.com/schema-guided-reasoning/) — Rinat Abdullin's original SGR write-up
 - [Vercel AI SDK v6](https://ai-sdk.dev/) — LLM driver
 - [ConnectRPC](https://connectrpc.com/) — BitGN transport protocol
+- [session-orchestrator](https://github.com/Kanevry/session-orchestrator) — the Claude Code harness used to build this agent
 
 ---
 
