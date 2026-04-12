@@ -3,8 +3,8 @@
 Thanks for your interest — but this is a frozen reference implementation from the
 BitGN Personal Agent Challenge (PAC) 2026 hackathon, not an active project.
 
-- **Issues are disabled.** If something is broken for you, it is probably broken
-  for me too. Please assume I already know and move on.
+- **Issues document known limitations and architectural context** for anyone
+  studying or forking this agent. They are not a support channel.
 - **Pull requests will not be reviewed or merged.**
 - **Forks are encouraged.** If you extend, adapt, or learn from this agent, I would
   love to hear about it — drop me a line via
