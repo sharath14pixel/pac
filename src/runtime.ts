@@ -93,7 +93,7 @@ export async function dispatch(vm: PcmClient, cmd: ToolCall) {
       return vm.answer(
         new AnswerRequest({
           message: cmd.message,
-          outcome: OUTCOME_MAP[cmd.outcome] ?? Outcome.OK,
+          outcome: OUTCOME_MAP[cmd.outcome] ?? Outcome.ERR_INTERNAL,
           refs: cmd.grounding_refs,
         })
       );

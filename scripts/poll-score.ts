@@ -4,7 +4,7 @@
 
 import { harness, GetRunRequest } from "../src/harness.js";
 
-const RUN_ID = process.env.POLL_RUN_ID ?? "run-22HnQAt9aryV9t9Qg4j1kvAiZ";
+const RUN_ID = process.argv[2] ?? process.env.POLL_RUN_ID ?? "run-22HnQAt9aryV9t9Qg4j1kvAiZ";
 const INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "15000");
 const MAX_ATTEMPTS = Number(process.env.POLL_MAX_ATTEMPTS ?? "40"); // 10 min
 
@@ -26,12 +26,6 @@ async function main() {
         console.log(`[${ts()}] ======================================`);
         console.log(`[${ts()}] FINAL SCORE: ${score}`);
         console.log(`[${ts()}] ======================================`);
-        if (run.scoreDetail && run.scoreDetail.length > 0) {
-          console.log(`[${ts()}] scoreDetail:`);
-          for (const line of run.scoreDetail) {
-            console.log(`  ${line}`);
-          }
-        }
         process.exit(0);
       }
       if (state === 3) {

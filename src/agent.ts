@@ -1,6 +1,6 @@
 import { generateText, type ModelMessage, generateId } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
-import { openai } from "@ai-sdk/openai";
+import { openai, createOpenAI } from "@ai-sdk/openai";
 import { agentTools, type ToolCall } from "./schema.js";
 import { dispatch, createRuntime } from "./runtime.js";
 import { createRuntimeTransport } from "./harness.js";
@@ -24,14 +24,18 @@ import {
   AnswerRequest,
   Outcome,
 } from "@buf/bitgn_api.bufbuild_es/bitgn/vm/pcm_pb.js";
-import { scanForInjection } from "./security.js";
-import { validateToolCallPaths } from "./paths.js";
-import { detectPersonalInfoQuery } from "./pii.js";
 import {
-  initialVisitedSet,
+  createHardeningState,
+  DESTRUCTIVE_TOOLS,
+  DESTRUCTIVE_BRAKE_THRESHOLD,
+  REFS_REJECTION_CAP,
   trackVisitedFromCall,
   validateGroundingRefs,
-} from "./refs.js";
+  validateToolCallPaths,
+  detectPersonalInfoQuery,
+  scanForInjection,
+  isUnsupportedFeature,
+} from "./hardening.js";
 import { withRetry } from "./retry.js";
 import { pruneMessages } from "./messages.js";
 
@@ -97,16 +101,75 @@ function withDispatchTimeout<T>(p: Promise<T>, ms: number = DISPATCH_TIMEOUT_MS)
   });
 }
 
-/** Max grounding-refs rejections per task before pass-through (B3). */
-const REFS_REJECTION_CAP = 3;
 
-/** Destructive-call nudge threshold per task (B4). */
-const DESTRUCTIVE_BRAKE_THRESHOLD = 10;
+let lastThoughtSignature: string | null = null;
 
-/** Tool names counted as destructive for B4. */
-const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set(["write", "delete", "move"]);
+const googleFetch: typeof fetch = async (url, opts) => {
+  if (opts?.body && typeof opts.body === "string" && lastThoughtSignature) {
+    try {
+      const parsed = JSON.parse(opts.body);
+      if (Array.isArray(parsed.messages)) {
+        for (const m of parsed.messages) {
+          if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+            for (const tc of m.tool_calls) {
+              if (!tc.extra_content) {
+                tc.extra_content = {
+                  google: { thought_signature: lastThoughtSignature },
+                };
+              }
+            }
+          }
+        }
+        opts.body = JSON.stringify(parsed);
+      }
+    } catch {}
+  }
+
+  const res = await fetch(url, opts);
+  const clone = res.clone();
+  clone
+    .json()
+    .then((d: any) => {
+      const sig =
+        d?.choices?.[0]?.message?.tool_calls?.[0]?.extra_content?.google
+          ?.thought_signature;
+      if (sig) lastThoughtSignature = sig;
+    })
+    .catch(() => {});
+
+  return res;
+};
+
+const google = createOpenAI({
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+  apiKey: process.env.GEMINI_API_KEY ?? "",
+  fetch: googleFetch,
+});
+
+const nvidia = createOpenAI({
+  baseURL: "https://integrate.api.nvidia.com/v1",
+  apiKey: process.env.NVIDIA_API_KEY ?? "",
+});
 
 function getModel(modelId: string) {
+  if (
+    process.env.GEMINI_API_KEY &&
+    (modelId.startsWith("gemini") ||
+      (!process.env.ANTHROPIC_API_KEY &&
+        !process.env.OPENAI_API_KEY &&
+        !process.env.NVIDIA_API_KEY))
+  ) {
+    return google.chat(modelId);
+  }
+  if (
+    process.env.NVIDIA_API_KEY &&
+    (modelId.startsWith("meta/") ||
+      modelId.startsWith("nvidia/") ||
+      modelId.startsWith("mistralai/") ||
+      modelId.startsWith("deepseek-ai/"))
+  ) {
+    return nvidia.chat(modelId);
+  }
   if (modelId.startsWith("gpt-") || modelId.startsWith("o")) {
     return openai.chat(modelId);
   }
@@ -148,10 +211,11 @@ export async function runAgent(
   }
 
   // Security scan the task text itself — injection can be embedded in the task instruction.
-  // Precedence: injection (DENIED_SECURITY) > PII refusal (NONE_UNSUPPORTED) > pass-through.
+  // Precedence: injection (DENIED_SECURITY) > PII refusal (NONE_UNSUPPORTED) > unsupported feature (NONE_UNSUPPORTED) > pass-through.
   // An injection attempt that also contains a PII query is still an attack, so security wins.
   const taskScan = ENABLE_SECURITY_SCAN ? scanForInjection(taskText) : null;
   const piiDetection = ENABLE_PII_REFUSAL ? detectPersonalInfoQuery(taskText) : null;
+  const unsupportedDetection = isUnsupportedFeature(taskText);
 
   if (taskScan?.detected) {
     console.log(`${CLI.yellow}⚠ INJECTION IN TASK TEXT (${taskScan.severity}): ${taskScan.patterns.join(", ")}${CLI.reset}`);
@@ -176,6 +240,14 @@ export async function runAgent(
       role: "user",
       content: `${taskText}\n\n[PII REFUSAL LAYER]\nThe task asks for personal information about a third party (${piiDetection.category}). This capability is out of scope for this agent. Report OUTCOME_NONE_UNSUPPORTED with a brief message explaining that the agent does not perform personal-information lookups about individuals. Do NOT attempt to look up the information in any file.`,
     });
+  } else if (unsupportedDetection) {
+    console.log(
+      `${CLI.yellow}⚠ UNSUPPORTED CAPABILITY QUERY: task requires capabilities not present in PCM runtime${CLI.reset}`
+    );
+    messages.push({
+      role: "user",
+      content: `${taskText}\n\n[CAPABILITY REFUSAL LAYER]\nThe task asks for capabilities unavailable in the sandboxed filesystem (such as external network/HTTP/API requests, SMTP mail sending, or external CRM sync). Report OUTCOME_NONE_UNSUPPORTED with a brief message explaining that the agent operates solely on local files and lacks external network/service integration. Do NOT make file modifications.`,
+    });
   } else {
     messages.push({ role: "user", content: taskText });
   }
@@ -184,24 +256,8 @@ export async function runAgent(
   let repeatCount = 0;
   let readSearchCount = 0; // Track consecutive read/search calls without write/completion
 
-  // Track B3 — Grounding refs self-validation state.
-  // Seed visited set with /AGENTS.md (always read during bootstrap) and any
-  // path-shaped strings in the task text (so the agent can legitimately
-  // cite paths the task referenced without actively re-reading them).
-  // Warn-only by default; strict blocking is opt-in to avoid false-positive
-  // regressions (user decision 11:15: avoid false positives above all).
-  const visitedPaths = ENABLE_REFS_VALIDATION ? initialVisitedSet(taskText) : null;
-  let refsRejectCount = 0;
-
-  // Track B4 — Destructive-call counter for reflection nudge. Reset per task.
-  let destructiveCount = 0;
-  let destructiveNudgeFired = false;
-
-  // C7: Total read/search cap — grows monotonically per task, never resets.
-  // Protects against (reads, pointless write, reads, pointless write) oscillation
-  // that would never hit the soft spiral brake because the brake resets on any write.
-  let totalReadSearchCount = 0;
-  let hardCapNudgeFired = false;
+  // Track B — Hardening state container (visited paths, destructive counts, caps)
+  const hardening = createHardeningState(taskText, ENABLE_REFS_VALIDATION);
   const HARD_READ_CAP = EXPLORATION_SPIRAL_THRESHOLD * 2;
 
   // C2: Tracks whether the agent successfully called report_completion. If false
@@ -231,7 +287,7 @@ export async function runAgent(
           tools: agentTools,
           maxOutputTokens: 16384,
         }),
-        { maxRetries: 5, baseDelay: 1000, maxDelay: 30_000 },
+        { maxRetries: 6, baseDelay: 3000, maxDelay: 60_000 },
       );
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -296,7 +352,7 @@ export async function runAgent(
     } else {
       readSearchCount += calls.length;
       // C7: Also accumulate into the monotonic total (never resets).
-      totalReadSearchCount += calls.filter(
+      hardening.totalReadSearchCount += calls.filter(
         (c) => ["read", "search", "find", "list", "tree"].includes(c.toolName)
       ).length;
       if (readSearchCount >= EXPLORATION_SPIRAL_THRESHOLD) {
@@ -329,15 +385,15 @@ export async function runAgent(
 
     // C7: Hard cap — cumulative read/search calls across all turns, including
     // turns that had pointless writes in between. Fires once per task.
-    if (!hardCapNudgeFired && totalReadSearchCount >= HARD_READ_CAP) {
-      hardCapNudgeFired = true;
+    if (!hardening.spiralHardCapFired && hardening.totalReadSearchCount >= HARD_READ_CAP) {
+      hardening.spiralHardCapFired = true;
       console.log(
-        `${CLI.yellow}HARD READ CAP: ${totalReadSearchCount} cumulative read/search calls this task — nudging${CLI.reset}`
+        `${CLI.yellow}HARD READ CAP: ${hardening.totalReadSearchCount} cumulative read/search calls this task — nudging${CLI.reset}`
       );
       messages.push({
         role: "user",
         content:
-          `SYSTEM: You have made ${totalReadSearchCount} cumulative read/search calls in this task. ` +
+          `SYSTEM: You have made ${hardening.totalReadSearchCount} cumulative read/search calls in this task. ` +
           `The soft spiral brake has been triggered or reset multiple times. ` +
           `If the task is findable with a few more directed reads, do those — otherwise call report_completion ` +
           `with OUTCOME_NONE_CLARIFICATION and explain what you could not resolve.`,
@@ -348,14 +404,14 @@ export async function runAgent(
     // would be destructive before dispatching any of them. If adding them would
     // exceed the threshold, skip dispatching and inject a nudge instead so the
     // LLM can course-correct before the burst lands.
-    if (ENABLE_DESTRUCTIVE_BRAKE && !destructiveNudgeFired) {
+    if (ENABLE_DESTRUCTIVE_BRAKE && !hardening.destructiveNudgeFired) {
       const turnDestructiveCount = calls.filter(
         (c) => DESTRUCTIVE_TOOLS.has(c.cmd.tool)
       ).length;
-      if (destructiveCount + turnDestructiveCount > DESTRUCTIVE_BRAKE_THRESHOLD) {
-        destructiveNudgeFired = true;
+      if (hardening.destructiveCount + turnDestructiveCount > DESTRUCTIVE_BRAKE_THRESHOLD) {
+        hardening.destructiveNudgeFired = true;
         console.log(
-          `${CLI.yellow}DESTRUCTIVE BRAKE (pre-turn): ${destructiveCount} prior + ${turnDestructiveCount} pending = over threshold — skipping turn${CLI.reset}`
+          `${CLI.yellow}DESTRUCTIVE BRAKE (pre-turn): ${hardening.destructiveCount} prior + ${turnDestructiveCount} pending = over threshold — skipping turn${CLI.reset}`
         );
         // Push the assistant message (so Vercel AI SDK sees the tool-call ids),
         // then push matching tool-results that contain the nudge instead of real
@@ -381,7 +437,7 @@ export async function runAgent(
             output: {
               type: "text" as const,
               value:
-                `SYSTEM: Destructive-op budget exceeded (${destructiveCount} prior + ${turnDestructiveCount} pending writes/deletes/moves). ` +
+                `SYSTEM: Destructive-op budget exceeded (${hardening.destructiveCount} prior + ${turnDestructiveCount} pending writes/deletes/moves). ` +
                 `This turn was NOT dispatched. Re-evaluate whether every destructive op is strictly required by the task. ` +
                 `If the task is already complete, call report_completion with OUTCOME_OK. ` +
                 `If the task is genuinely impossible within budget, call report_completion with OUTCOME_NONE_CLARIFICATION.`,
@@ -481,16 +537,16 @@ export async function runAgent(
       // REFS_REJECTION_CAP times per task, then pass-through.
       if (
         ENABLE_REFS_VALIDATION &&
-        visitedPaths &&
+        hardening.visitedPaths.size > 0 &&
         c.cmd.tool === "report_completion"
       ) {
-        const refsCheck = validateGroundingRefs(c.cmd.grounding_refs, visitedPaths);
+        const refsCheck = validateGroundingRefs(c.cmd.grounding_refs, hardening.visitedPaths);
         if (!refsCheck.ok) {
           const unknownList = refsCheck.unknownRefs.join(", ");
-          if (ENABLE_REFS_VALIDATION_STRICT && refsRejectCount < REFS_REJECTION_CAP) {
-            refsRejectCount++;
+          if (ENABLE_REFS_VALIDATION_STRICT && hardening.refsRejectCount < REFS_REJECTION_CAP) {
+            hardening.refsRejectCount++;
             console.log(
-              `${CLI.yellow}⚠ REFS REJECT (strict, ${refsRejectCount}/${REFS_REJECTION_CAP})${CLI.reset}: ${unknownList}`
+              `${CLI.yellow}⚠ REFS REJECT (strict, ${hardening.refsRejectCount}/${REFS_REJECTION_CAP})${CLI.reset}: ${unknownList}`
             );
             toolResults.push({
               type: "tool-result",
@@ -512,12 +568,12 @@ export async function runAgent(
       try {
         const dispatchResult = await withRetry(() => withDispatchTimeout(dispatch(vm, c.cmd)));
         // Track visited paths post-dispatch for B3 grounding validation.
-        if (visitedPaths) {
-          trackVisitedFromCall(visitedPaths, c.cmd);
+        if (ENABLE_REFS_VALIDATION) {
+          trackVisitedFromCall(hardening.visitedPaths, c.cmd);
         }
         // Track B4 — Destructive-call counter. Nudges only, never blocks.
         if (ENABLE_DESTRUCTIVE_BRAKE && DESTRUCTIVE_TOOLS.has(c.cmd.tool)) {
-          destructiveCount++;
+          hardening.destructiveCount++;
         }
         resultText = formatResult(c.cmd, dispatchResult);
         // Append a reflection nudge to the FIRST result after the threshold
@@ -526,15 +582,15 @@ export async function runAgent(
         // will see on its next turn.
         if (
           ENABLE_DESTRUCTIVE_BRAKE &&
-          !destructiveNudgeFired &&
-          destructiveCount > DESTRUCTIVE_BRAKE_THRESHOLD
+          !hardening.destructiveNudgeFired &&
+          hardening.destructiveCount > DESTRUCTIVE_BRAKE_THRESHOLD
         ) {
-          destructiveNudgeFired = true;
+          hardening.destructiveNudgeFired = true;
           console.log(
-            `${CLI.yellow}⚠ DESTRUCTIVE BRAKE: ${destructiveCount} destructive ops in this task — nudging${CLI.reset}`
+            `${CLI.yellow}⚠ DESTRUCTIVE BRAKE: ${hardening.destructiveCount} destructive ops in this task — nudging${CLI.reset}`
           );
           resultText +=
-            `\n\nSYSTEM NOTICE: You have made ${destructiveCount} destructive operations (write/delete/move) in this single task. ` +
+            `\n\nSYSTEM NOTICE: You have made ${hardening.destructiveCount} destructive operations (write/delete/move) in this single task. ` +
             `Confirm each remaining destructive call is strictly required by the task instruction. If the task is already complete, call report_completion with OUTCOME_OK. Do not continue making writes unless absolutely necessary.`;
         }
         const preview =

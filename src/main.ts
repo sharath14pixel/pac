@@ -1,7 +1,8 @@
 import pLimit from "p-limit";
 import { harness, StartPlaygroundRequest, GetBenchmarkRequest, StatusRequest, EndTrialRequest, StartRunRequest, StartTrialRequest, GetRunRequest, SubmitRunRequest } from "./harness.js";
-import { BENCHMARK_ID, BITGN_API_KEY, CLI, CONCURRENCY, MODEL_ID } from "./config.js";
+import { BENCHMARK_ID, BITGN_API_KEY, CLI, CONCURRENCY, MODEL_ID, TASK_PACING_MS, validateEnvironment } from "./config.js";
 import { runAgent } from "./agent.js";
+import { withRetry } from "./retry.js";
 import { ConnectError } from "@connectrpc/connect";
 import { EvalPolicy } from "@buf/bitgn_api.bufbuild_es/bitgn/harness_pb.js";
 import { recordTask } from "./metrics.js";
@@ -26,6 +27,8 @@ async function main() {
 
   const scores: Array<{ taskId: string; score: number }> = [];
   let recorded = 0;
+
+  validateEnvironment();
 
   try {
     // Connect
@@ -231,6 +234,10 @@ async function processTrial(
     }
   }
 
+  if (TASK_PACING_MS > 0) {
+    await new Promise((r) => setTimeout(r, TASK_PACING_MS));
+  }
+
   return {
     trialId,
     taskId: trial.taskId,
@@ -286,9 +293,10 @@ async function runSession(
     console.error(`${CLI.red}[trial errors] ${errors} trial(s) rejected — see logs above${CLI.reset}`);
   }
 
-  // Submit run
-  const submitted = await harness.submitRun(
-    new SubmitRunRequest({ runId: run.runId, force: true })
+  // Submit run with resilient retry
+  const submitted = await withRetry(
+    () => harness.submitRun(new SubmitRunRequest({ runId: run.runId, force: true })),
+    { maxRetries: 5, baseDelay: 1000, maxDelay: 15000 }
   );
   console.log(`\nRun submitted: ${run.runId} — state: ${submitted.state}`);
 

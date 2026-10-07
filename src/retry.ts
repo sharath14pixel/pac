@@ -25,9 +25,15 @@ const NON_TRANSIENT_CODES = new Set<Code>([
 const TRANSIENT_PATTERNS = [
   "429",
   "529",
+  "too many requests",
   "rate limit",
   "rate_limit",
   "rate-limit",
+  "ratelimit",
+  "resource_exhausted",
+  "resourceexhausted",
+  "quota",
+  "quota exceeded",
   "timeout",
   "econnreset",
   "etimedout",
@@ -38,6 +44,7 @@ const TRANSIENT_PATTERNS = [
   "insufficient_quota",
   "bad gateway",
   "gateway timeout",
+  "fetch failed",
 ];
 
 export function isTransientError(err: unknown): boolean {
@@ -45,6 +52,14 @@ export function isTransientError(err: unknown): boolean {
     if (NON_TRANSIENT_CODES.has(err.code)) return false;
     if (TRANSIENT_CODES.has(err.code)) return true;
     return false;
+  }
+
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    const status = e.status ?? e.statusCode ?? (e.response as any)?.status;
+    if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+      return true;
+    }
   }
 
   const message =
@@ -82,14 +97,25 @@ function parseRetryAfter(value: unknown): number | null {
  */
 function extractRetryAfterMs(err: unknown): number | null {
   if (!err || typeof err !== "object") return null;
-  const e = err as { responseHeaders?: Record<string, string>; headers?: Record<string, string> };
-  const headers = e.responseHeaders ?? e.headers;
-  if (!headers) return null;
-  // Try common header names (case-insensitive)
-  for (const key of Object.keys(headers)) {
-    if (key.toLowerCase() === "retry-after") {
-      return parseRetryAfter(headers[key]);
+  const e = err as Record<string, unknown>;
+  const headers = (e.responseHeaders ?? e.headers) as Record<string, string> | undefined;
+  if (headers) {
+    // Try common header names (case-insensitive)
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === "retry-after") {
+        return parseRetryAfter(headers[key]);
+      }
     }
+  }
+
+  // Check if error message mentions retry time (e.g. "retry after 32s")
+  const msg = typeof e.message === "string" ? e.message : "";
+  const match = msg.match(/retry (?:after|in) (\d+(?:\.\d+)?)\s*(s|sec|seconds?|ms)/i);
+  if (match) {
+    const val = parseFloat(match[1]);
+    const unit = match[2].toLowerCase();
+    if (unit.startsWith("ms")) return Math.round(val);
+    return Math.round(val * 1000);
   }
   return null;
 }
@@ -119,8 +145,11 @@ export async function withRetry<T>(
       // we never wait longer than the caller configured.
       const retryAfterMs = extractRetryAfterMs(err);
       const backoffMs = Math.min(baseDelay * 2 ** attempt, maxDelay);
-      const rawDelay = retryAfterMs != null ? Math.min(retryAfterMs, maxDelay) : backoffMs;
-      const delay = jitter(rawDelay);
+      const rawDelay = retryAfterMs != null ? Math.max(retryAfterMs, backoffMs) : backoffMs;
+      const delay = jitter(Math.min(rawDelay, maxDelay));
+
+      const errBrief = err instanceof Error ? err.message.slice(0, 100) : String(err).slice(0, 100);
+      console.log(`\n  \x1B[33m[retry] Rate limit / transient error (${errBrief}). Retrying in ${(delay / 1000).toFixed(1)}s (attempt ${attempt + 1}/${maxRetries})...\x1B[0m`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }

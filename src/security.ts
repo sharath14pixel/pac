@@ -197,9 +197,7 @@ const UNSUPPORTED_PATTERNS: readonly RegExp[] = [
 ] as const;
 
 /**
- * @internal UNWIRED — available for OUTCOME_NONE_UNSUPPORTED routing. Not currently called;
- * wire into pre-LLM check if the agent encounters tasks referencing external APIs
- * (HTTP, webhook, CRM sync).
+ * Wired into pre-LLM task check in agent.ts.
  *
  * Returns `true` if the task text requests a capability that does not
  * exist in the PCM runtime (file-based system). These should be

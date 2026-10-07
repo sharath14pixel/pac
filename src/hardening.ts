@@ -13,7 +13,7 @@ export {
 } from "./refs.js";
 export { detectPersonalInfoQuery } from "./pii.js";
 export { redactSecrets } from "./redaction.js";
-export { scanForInjection } from "./security.js";
+export { scanForInjection, isUnsupportedFeature, validateEmailDomain } from "./security.js";
 
 // Shared constants — hardcoded in src/agent.ts, extracted here so the SDK path
 // sees the same values.

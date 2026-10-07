@@ -14,7 +14,7 @@ async function main() {
 
   try {
     const run = await harness.getRun(new GetRunRequest({ runId: RUN_ID }));
-    console.log(`run state=${run.state} trials=${run.trialIds?.length ?? "?"}`);
+    console.log(`run state=${run.state} trials=${run.trials?.length ?? "?"}`);
     console.log(`score=${run.score}`);
   } catch (err) {
     console.error(`getRun FAILED: ${err}`);

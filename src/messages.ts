@@ -35,46 +35,72 @@ const SPLICE_MESSAGE: ModelMessage = {
 };
 
 /**
- * Returns a new array with middle messages removed (FIFO) to fit within token budget.
+ * Groups messages into conversational turns.
+ * An assistant message with tool calls and the following tool message form an atomic turn
+ * that must never be severed.
+ */
+function groupIntoTurns(messages: ModelMessage[]): ModelMessage[][] {
+  const turns: ModelMessage[][] = [];
+  let i = 0;
+  while (i < messages.length) {
+    const current = messages[i];
+    if (
+      current.role === "assistant" &&
+      i + 1 < messages.length &&
+      messages[i + 1].role === "tool"
+    ) {
+      turns.push([current, messages[i + 1]]);
+      i += 2;
+    } else {
+      turns.push([current]);
+      i += 1;
+    }
+  }
+  return turns;
+}
+
+/**
+ * Returns a new array with middle turns removed (FIFO) to fit within token budget.
  *
  * Preserves the first `keepFirst` messages (bootstrap context) and
- * the last `keepLast` messages (recent context). Removes from the
- * oldest middle messages first.
+ * the last `keepLast` messages (recent context) while ensuring tool calls
+ * and matching tool results are never broken apart.
  */
 export function pruneMessages(
   messages: ModelMessage[],
   opts?: PruneOptions
 ): ModelMessage[] {
   const maxTokens = opts?.maxTokens ?? 100_000;
-  const keepFirst = opts?.keepFirst ?? 4;
-  const keepLast = opts?.keepLast ?? 10;
 
   // Nothing to prune if under budget
   if (estimateTokens(messages) < maxTokens) {
     return messages;
   }
 
-  // Nothing to prune if head + tail cover all messages
-  if (keepFirst + keepLast >= messages.length) {
+  const turns = groupIntoTurns(messages);
+  const keepFirstTurns = Math.max(1, Math.floor((opts?.keepFirst ?? 4) / 2));
+  const keepLastTurns = Math.max(1, Math.floor((opts?.keepLast ?? 10) / 2));
+
+  // Nothing to prune if head + tail cover all turns
+  if (keepFirstTurns + keepLastTurns >= turns.length) {
     return messages;
   }
 
-  const head = messages.slice(0, keepFirst);
-  const middle = messages.slice(keepFirst, messages.length - keepLast);
-  const tail = messages.slice(messages.length - keepLast);
+  const head = turns.slice(0, keepFirstTurns).flat();
+  const middleTurns = turns.slice(keepFirstTurns, turns.length - keepLastTurns);
+  const tail = turns.slice(turns.length - keepLastTurns).flat();
 
-  // Remove oldest middle messages first until under budget
-  let remaining = [...middle];
+  let remainingTurns = [...middleTurns];
 
-  while (remaining.length > 0) {
-    const candidate = [...head, SPLICE_MESSAGE, ...remaining, ...tail];
+  while (remainingTurns.length > 0) {
+    const candidate = [...head, SPLICE_MESSAGE, ...remainingTurns.flat(), ...tail];
     if (estimateTokens(candidate) < maxTokens) {
       return candidate;
     }
-    // Drop the oldest middle message
-    remaining.shift();
+    // Drop the oldest middle turn atomically
+    remainingTurns.shift();
   }
 
-  // All middle messages removed — best effort
+  // All middle turns removed — best effort
   return [...head, SPLICE_MESSAGE, ...tail];
 }

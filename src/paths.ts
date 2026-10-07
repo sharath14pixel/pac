@@ -62,6 +62,7 @@ const FORBIDDEN_PREFIXES: readonly string[] = [
 function normalizePath(p: string): string {
   if (!p) return "";
   let n = p.trim().toLowerCase();
+  n = n.replace(/\\/g, "/");
   n = n.replace(/\/+/g, "/");
   if (n.length > 1 && n.endsWith("/")) n = n.slice(0, -1);
   return n;

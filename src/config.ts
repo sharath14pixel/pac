@@ -8,8 +8,22 @@ config({ path: envFile, override: true });
 export const BITGN_API_KEY = process.env.BITGN_API_KEY ?? "";
 export const BENCHMARK_HOST = process.env.BENCHMARK_HOST ?? "https://api.bitgn.com";
 export const BENCHMARK_ID = process.env.BENCHMARK_ID ?? "bitgn/pac1-dev";
-export const MODEL_ID = process.env.MODEL_ID ?? "claude-sonnet-4-6";
-export const MAX_STEPS = Number(process.env.MAX_STEPS ?? "30");
+function resolveDefaultModel(): string {
+  if (process.env.MODEL_ID) return process.env.MODEL_ID;
+  if (process.env.GEMINI_API_KEY) return "gemini-3.5-flash-lite";
+  if (process.env.OPENAI_API_KEY) return "gpt-4o-mini";
+  if (process.env.NVIDIA_API_KEY) return "meta/llama-3.3-70b-instruct";
+  return "claude-sonnet-4-6";
+}
+
+function parsePositiveInt(val: string | undefined, fallback: number): number {
+  if (!val) return fallback;
+  const parsed = Number.parseInt(val, 10);
+  return Number.isNaN(parsed) || parsed <= 0 ? fallback : parsed;
+}
+
+export const MODEL_ID = resolveDefaultModel();
+export const MAX_STEPS = parsePositiveInt(process.env.MAX_STEPS, 30);
 export const ENABLE_SECURITY_SCAN = process.env.ENABLE_SECURITY_SCAN !== "false";
 export const VERBOSE = process.env.VERBOSE === "true";
 
@@ -30,11 +44,14 @@ export const ENABLE_SECRET_REDACTION = process.env.ENABLE_SECRET_REDACTION !== "
 // Exploration-spiral brake threshold. A hardcoded cap was too tight for
 // read-heavy tasks like account lookups — configurable per run so it can be
 // tuned without a code change.
-export const EXPLORATION_SPIRAL_THRESHOLD = Number(process.env.EXPLORATION_SPIRAL_THRESHOLD ?? "35");
+export const EXPLORATION_SPIRAL_THRESHOLD = parsePositiveInt(process.env.EXPLORATION_SPIRAL_THRESHOLD, 35);
 
 // Intra-run task parallelism. Default 1 = serial. See src/main.ts processTrial.
 // Raise to run multiple trials concurrently within one session.
-export const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY ?? "1"));
+export const CONCURRENCY = parsePositiveInt(process.env.CONCURRENCY, 1);
+
+// Inter-trial pacing delay in ms to avoid provider RPM rate limit bursts
+export const TASK_PACING_MS = parsePositiveInt(process.env.TASK_PACING_MS, 1500);
 
 export const CLI = {
   red: "\x1B[31m",
@@ -44,3 +61,17 @@ export const CLI = {
   dim: "\x1B[2m",
   reset: "\x1B[0m",
 } as const;
+
+export function validateEnvironment(): void {
+  const missing: string[] = [];
+  if (!BITGN_API_KEY) missing.push("BITGN_API_KEY");
+  if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY && !process.env.NVIDIA_API_KEY && !process.env.GEMINI_API_KEY) {
+    missing.push("GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY");
+  }
+  if (missing.length > 0) {
+    console.error(`${CLI.red}[CONFIG ERROR] Missing required environment variable(s): ${missing.join(", ")}${CLI.reset}`);
+    console.error(`Please configure your credentials in .env.local.`);
+    process.exit(1);
+  }
+}
+
